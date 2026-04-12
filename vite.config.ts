@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  base: '/drum-machine/',
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
@@ -14,7 +15,7 @@ export default defineConfig({
         background_color: '#06060e',
         display: 'standalone',
         orientation: 'any',
-        start_url: '/',
+        start_url: '/drum-machine/',
         icons: [
           {
             src: 'icon-192.png',

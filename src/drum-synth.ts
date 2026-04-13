@@ -15,24 +15,58 @@ function getNoiseBuffer(ctx: AudioContext, duration: number): AudioBuffer {
   return buf;
 }
 
+/** Handle returned by hi-hat synths for choke control. */
+export interface DrumVoice {
+  /** Fade out over `duration` seconds starting at `time`, then stop all sources. */
+  choke(time: number, fadeDuration: number): void;
+}
+
+const EMPTY_VOICE: DrumVoice = { choke() {} };
+
 export function synthesizeDrum(
   ctx: AudioContext,
   dest: AudioNode,
   type: DrumType,
   time: number,
-): void {
+): DrumVoice {
   switch (type) {
-    case DrumType.Kick:      return synthKick(ctx, dest, time);
-    case DrumType.Snare:     return synthSnare(ctx, dest, time);
-    case DrumType.Clap:      return synthClap(ctx, dest, time);
+    case DrumType.Kick:      synthKick(ctx, dest, time); return EMPTY_VOICE;
+    case DrumType.Snare:     synthSnare(ctx, dest, time); return EMPTY_VOICE;
+    case DrumType.Clap:      synthClap(ctx, dest, time); return EMPTY_VOICE;
     case DrumType.ClosedHat: return synthClosedHat(ctx, dest, time);
     case DrumType.OpenHat:   return synthOpenHat(ctx, dest, time);
-    case DrumType.Tom:       return synthTom(ctx, dest, time);
-    case DrumType.Rim:       return synthRim(ctx, dest, time);
-    case DrumType.Crash:     return synthCrash(ctx, dest, time);
+    case DrumType.Tom:       synthTom(ctx, dest, time); return EMPTY_VOICE;
+    case DrumType.Rim:       synthRim(ctx, dest, time); return EMPTY_VOICE;
+    case DrumType.Crash:     synthCrash(ctx, dest, time); return EMPTY_VOICE;
   }
 }
 
+/** Helper: build a chokeable voice from a master gain and its source nodes. */
+function makeVoice(
+  ctx: AudioContext,
+  masterGain: GainNode,
+  sources: (OscillatorNode | AudioBufferSourceNode)[],
+  naturalEnd: number,
+): DrumVoice {
+  let choked = false;
+  return {
+    choke(time: number, fadeDuration: number) {
+      if (choked) return;
+      choked = true;
+      // Cancel any scheduled ramps on the gain, then fade to silence
+      masterGain.gain.cancelScheduledValues(time);
+      masterGain.gain.setValueAtTime(masterGain.gain.value, time);
+      masterGain.gain.linearRampToValueAtTime(0, time + fadeDuration);
+      // Stop all sources just after the fade completes
+      const stopAt = time + fadeDuration + 0.002;
+      for (const s of sources) {
+        try { s.stop(stopAt); } catch { /* already stopped */ }
+      }
+    },
+  };
+}
+
+// ─── Kick ──────────────────────────────────────────────────────────
 function synthKick(ctx: AudioContext, dest: AudioNode, t: number) {
   const osc = ctx.createOscillator();
   const g = ctx.createGain();
@@ -46,7 +80,6 @@ function synthKick(ctx: AudioContext, dest: AudioNode, t: number) {
   osc.start(t);
   osc.stop(t + 0.45);
 
-  // Click transient
   const c = ctx.createOscillator();
   const cg = ctx.createGain();
   c.type = 'square';
@@ -59,8 +92,8 @@ function synthKick(ctx: AudioContext, dest: AudioNode, t: number) {
   c.stop(t + 0.03);
 }
 
+// ─── Snare ─────────────────────────────────────────────────────────
 function synthSnare(ctx: AudioContext, dest: AudioNode, t: number) {
-  // Body tone
   const osc = ctx.createOscillator();
   const og = ctx.createGain();
   osc.type = 'triangle';
@@ -72,7 +105,6 @@ function synthSnare(ctx: AudioContext, dest: AudioNode, t: number) {
   osc.start(t);
   osc.stop(t + 0.12);
 
-  // Noise wires
   const n = ctx.createBufferSource();
   n.buffer = getNoiseBuffer(ctx, 0.25);
   const hp = ctx.createBiquadFilter();
@@ -86,6 +118,7 @@ function synthSnare(ctx: AudioContext, dest: AudioNode, t: number) {
   n.stop(t + 0.25);
 }
 
+// ─── Clap ──────────────────────────────────────────────────────────
 function synthClap(ctx: AudioContext, dest: AudioNode, t: number) {
   for (let i = 0; i < 4; i++) {
     const bt = t + i * 0.012;
@@ -105,7 +138,14 @@ function synthClap(ctx: AudioContext, dest: AudioNode, t: number) {
   }
 }
 
-function synthClosedHat(ctx: AudioContext, dest: AudioNode, t: number) {
+// ─── Closed Hi-Hat ─────────────────────────────────────────────────
+function synthClosedHat(ctx: AudioContext, dest: AudioNode, t: number): DrumVoice {
+  // All hat sources route through a single master gain for choke control
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(1, t);
+  master.connect(dest);
+  const sources: (OscillatorNode | AudioBufferSourceNode)[] = [];
+
   const n = ctx.createBufferSource();
   n.buffer = getNoiseBuffer(ctx, 0.08);
   const hp = ctx.createBiquadFilter();
@@ -118,9 +158,10 @@ function synthClosedHat(ctx: AudioContext, dest: AudioNode, t: number) {
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.45, t);
   g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
-  n.connect(hp).connect(bp).connect(g).connect(dest);
+  n.connect(hp).connect(bp).connect(g).connect(master);
   n.start(t);
   n.stop(t + 0.08);
+  sources.push(n);
 
   const o = ctx.createOscillator();
   o.type = 'square';
@@ -128,14 +169,23 @@ function synthClosedHat(ctx: AudioContext, dest: AudioNode, t: number) {
   const og = ctx.createGain();
   og.gain.setValueAtTime(0.07, t);
   og.gain.exponentialRampToValueAtTime(0.001, t + 0.035);
-  o.connect(og).connect(dest);
+  o.connect(og).connect(master);
   o.start(t);
   o.stop(t + 0.04);
+  sources.push(o);
+
+  return makeVoice(ctx, master, sources, t + 0.08);
 }
 
-function synthOpenHat(ctx: AudioContext, dest: AudioNode, t: number) {
+// ─── Open Hi-Hat ───────────────────────────────────────────────────
+function synthOpenHat(ctx: AudioContext, dest: AudioNode, t: number): DrumVoice {
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(1, t);
+  master.connect(dest);
+  const sources: (OscillatorNode | AudioBufferSourceNode)[] = [];
+
   const n = ctx.createBufferSource();
-  n.buffer = getNoiseBuffer(ctx, 0.5);
+  n.buffer = getNoiseBuffer(ctx, 0.6);
   const hp = ctx.createBiquadFilter();
   hp.type = 'highpass';
   hp.frequency.setValueAtTime(6000, t);
@@ -144,11 +194,14 @@ function synthOpenHat(ctx: AudioContext, dest: AudioNode, t: number) {
   bp.frequency.setValueAtTime(9000, t);
   bp.Q.setValueAtTime(0.8, t);
   const g = ctx.createGain();
+  // Longer sustain with natural tail — clearly longer than closed hat
   g.gain.setValueAtTime(0.45, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-  n.connect(hp).connect(bp).connect(g).connect(dest);
+  g.gain.setValueAtTime(0.42, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+  n.connect(hp).connect(bp).connect(g).connect(master);
   n.start(t);
-  n.stop(t + 0.5);
+  n.stop(t + 0.6);
+  sources.push(n);
 
   for (const freq of [5620, 7440]) {
     const o = ctx.createOscillator();
@@ -156,13 +209,17 @@ function synthOpenHat(ctx: AudioContext, dest: AudioNode, t: number) {
     o.frequency.setValueAtTime(freq, t);
     const og = ctx.createGain();
     og.gain.setValueAtTime(0.05, t);
-    og.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-    o.connect(og).connect(dest);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    o.connect(og).connect(master);
     o.start(t);
-    o.stop(t + 0.25);
+    o.stop(t + 0.35);
+    sources.push(o);
   }
+
+  return makeVoice(ctx, master, sources, t + 0.6);
 }
 
+// ─── Tom ───────────────────────────────────────────────────────────
 function synthTom(ctx: AudioContext, dest: AudioNode, t: number) {
   const osc = ctx.createOscillator();
   const g = ctx.createGain();
@@ -187,6 +244,7 @@ function synthTom(ctx: AudioContext, dest: AudioNode, t: number) {
   c.stop(t + 0.03);
 }
 
+// ─── Rim ───────────────────────────────────────────────────────────
 function synthRim(ctx: AudioContext, dest: AudioNode, t: number) {
   const n = ctx.createBufferSource();
   n.buffer = getNoiseBuffer(ctx, 0.05);
@@ -212,6 +270,7 @@ function synthRim(ctx: AudioContext, dest: AudioNode, t: number) {
   o.stop(t + 0.03);
 }
 
+// ─── Crash ─────────────────────────────────────────────────────────
 function synthCrash(ctx: AudioContext, dest: AudioNode, t: number) {
   const n = ctx.createBufferSource();
   n.buffer = getNoiseBuffer(ctx, 1.5);
